@@ -1,142 +1,130 @@
 #!/bin/bash
 
-# Цвета для красивого вывода
+# Цвета
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
-NC='\033[0m' # No Color
+NC='\033[0m'
+
+# Функция ожидания освобождения apt
+wait_for_apt() {
+    echo -e "${YELLOW}>>> Проверка блокировок apt...${NC}"
+    while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+        echo -ne "${RED}Ждем завершения системных обновлений... (это может занять пару минут)${NC}\r"
+        sleep 3
+    done
+    echo -e "${GREEN}>>> Блокировки сняты! Продолжаем.${NC}"
+}
 
 clear
 echo -e "${CYAN}================================================${NC}"
-echo -e "${CYAN}   СКРИПТ УСТАНОВКИ ФЕРМЫ 3X-UI (AUTO-SETUP)   ${NC}"
-echo -e "${CYAN}   v3.0 | BBR + IPv6 Disable + Docker + SSL     ${NC}"
+echo -e "${CYAN}   СКРИПТ УСТАНОВКИ ФЕРМЫ 3X-UI (v4.0 Final)   ${NC}"
 echo -e "${CYAN}================================================${NC}"
 
-# 0. Определение IP сервера
+# 0. Определение IP
 SERVER_IP=$(curl -s -4 ifconfig.me)
-if [ -z "$SERVER_IP" ]; then
-    SERVER_IP=$(curl -s -4 icanhazip.com)
-fi
 if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(hostname -I | awk '{print $1}')
 fi
+echo -e "${MAGENTA}>>> IP сервера: $SERVER_IP ${NC}"
 
-echo -e "${MAGENTA}>>> Ваш IP адрес: $SERVER_IP ${NC}"
-echo -e ""
+# 1. Настройка системы
+echo -e "${YELLOW}>>> [1/8] Настройка BBR и отключение IPv6...${NC}"
+wait_for_apt # Ждем блокировку
 
-# 1. Настройка системы (BBR + IPv6 Disable)
-echo -e "${YELLOW}>>> [1/8] Настройка системы (BBR и откл. IPv6)...${NC}"
-
-# Бэкап конфига
-cp /etc/sysctl.conf /etc/sysctl.conf.bak
-
-# Удаляем старые дублирующиеся записи, если есть
+# Отключение IPv6 и включение BBR
 sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
 sed -i '/net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
 sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
 sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
 
-# Добавляем новые настройки
 cat >> /etc/sysctl.conf <<EOF
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 EOF
-
-# Применяем
 sysctl -p &>/dev/null
-echo -e "${GREEN}IPv6 отключен, BBR активирован!${NC}"
 
-# 2. Обновление системы
-echo -e "${YELLOW}>>> [2/8] Обновление списков пакетов...${NC}"
+# 2. Обновление
+echo -e "${YELLOW}>>> [2/8] Обновление пакетов...${NC}"
+wait_for_apt
+# Если процесс обновления завис намертво, убиваем его
+killall unattended-upgr 2>/dev/null
+rm /var/lib/apt/lists/lock 2>/dev/null
+rm /var/cache/apt/archives/lock 2>/dev/null
+rm /var/lib/dpkg/lock* 2>/dev/null
+
 apt update -y
+wait_for_apt
 
-# 3. Установка Docker
-echo -e "${YELLOW}>>> [3/8] Проверка Docker...${NC}"
+# 3. Docker
+echo -e "${YELLOW}>>> [3/8] Установка Docker...${NC}"
+wait_for_apt
 if ! command -v docker &> /dev/null; then
-    echo -e "${YELLOW}Docker не найден. Устанавливаю...${NC}"
     curl -fsSL https://get.docker.com -o get-docker.sh
     sh get-docker.sh
     rm get-docker.sh
-    
     if ! command -v docker &> /dev/null; then
-        echo -e "${RED}Не удалось поставить Docker скриптом. Пробую через apt...${NC}"
         apt install docker.io -y
     fi
-else
-    echo -e "${GREEN}Docker уже установлен.${NC}"
 fi
 
-# Проверка Docker Compose
 DOCKER_COMPOSE_CMD=""
 if docker compose version &> /dev/null; then
     DOCKER_COMPOSE_CMD="docker compose"
 elif command -v docker-compose &> /dev/null; then
     DOCKER_COMPOSE_CMD="docker-compose"
 else
-    echo -e "${YELLOW}Устанавливаю Docker Compose...${NC}"
     apt install docker-compose -y
     DOCKER_COMPOSE_CMD="docker-compose"
 fi
-
 systemctl enable --now docker
 
-# 4. Ввод данных (Домен, Пароли)
-echo -e "${CYAN}------------------------------------------------${NC}"
-echo -e "${YELLOW}>>> [4/8] Конфигурация${NC}"
+# 4. Данные
+echo -e "${YELLOW}>>> [4/8] Ввод данных${NC}"
+read -p "Введите ДОМЕН: " DOMAIN
+if [ -z "$DOMAIN" ]; then echo "Нет домена. Выход."; exit 1; fi
 
-read -p "Введите ваш ДОМЕН (например, site.com): " DOMAIN
-if [ -z "$DOMAIN" ]; then
-    echo -e "${RED}Домен не введен. Выход.${NC}"
-    exit 1
-fi
-
-echo -e "${CYAN}--- Единые данные для входа во ВСЕ панели ---${NC}"
-read -p "Придумайте ЛОГИН (по умолчанию admin): " NEW_USERNAME
+echo -e "${CYAN}--- Единый вход для всех панелей ---${NC}"
+read -p "Логин (Admin): " NEW_USERNAME
 NEW_USERNAME=${NEW_USERNAME:-admin}
-
-read -p "Придумайте ПАРОЛЬ (по умолчанию admin): " NEW_PASSWORD
+read -p "Пароль (Admin): " NEW_PASSWORD
 NEW_PASSWORD=${NEW_PASSWORD:-admin}
 
-# 5. SSL Сертификат
-echo -e "${CYAN}------------------------------------------------${NC}"
-echo -e "${YELLOW}>>> [5/8] Получение SSL сертификата...${NC}"
+# 5. SSL
+echo -e "${YELLOW}>>> [5/8] Получение SSL...${NC}"
+wait_for_apt
 apt install certbot -y
 
-# Останавливаем всё, что может занимать 80 порт
 systemctl stop nginx 2>/dev/null
 systemctl stop apache2 2>/dev/null
 
-certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
+# ВОТ ЗДЕСЬ ФЛАГИ ДЛЯ ОТКЛЮЧЕНИЯ ВОПРОСОВ
+certbot certonly --standalone -d "$DOMAIN" \
+--non-interactive \
+--agree-tos \
+--register-unsafely-without-email
 
 CERT_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
 KEY_PATH="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 
 if [ ! -f "$CERT_PATH" ]; then
-    echo -e "${RED}ОШИБКА: Сертификат не получен! Проверьте, что домен $DOMAIN направлен на IP $SERVER_IP${NC}"
+    echo -e "${RED}Ошибка SSL! Проверьте, что домен $DOMAIN смотрит на $SERVER_IP${NC}"
     exit 1
-else
-    echo -e "${GREEN}Сертификаты получены успешно!${NC}"
 fi
 
-# 6. Количество панелей
-echo -e "${CYAN}------------------------------------------------${NC}"
-read -p "Сколько панелей установить (1-100): " PANEL_COUNT
-if ! [[ "$PANEL_COUNT" =~ ^[0-9]+$ ]] || [ "$PANEL_COUNT" -lt 1 ] || [ "$PANEL_COUNT" -gt 100 ]; then
-    echo -e "${RED}Неверное число.${NC}"
-    exit 1
-fi
+# 6. Кол-во панелей
+read -p "Количество панелей (1-100): " PANEL_COUNT
 
 BASE_DIR="/root/3x-ui-farm"
 mkdir -p $BASE_DIR
 cd $BASE_DIR
 
-# 7. Генерация docker-compose.yml
-echo -e "${YELLOW}>>> [6/8] Генерация конфига Docker...${NC}"
-
+# 7. Конфиг
+echo -e "${YELLOW}>>> [6/8] Генерация конфига...${NC}"
 cat > docker-compose.yml <<EOF
 version: '3'
 services:
@@ -159,94 +147,56 @@ do
 EOF
 done
 
-# 8. Интерактивная настройка
+# 8. Интерактив
 echo -e "${CYAN}================================================${NC}"
-echo -e "${CYAN}   НАЧАЛО НАСТРОЙКИ ПАНЕЛЕЙ ПО ОЧЕРЕДИ ($PANEL_COUNT шт.)   ${NC}"
+echo -e "${CYAN}   НАСТРОЙКА ПАНЕЛЕЙ ПО ОЧЕРЕДИ   ${NC}"
 echo -e "${CYAN}================================================${NC}"
-echo -e "${RED}ВАЖНО:${NC} Не закрывайте этот скрипт."
-echo -e "Мы будем запускать панели по одной, вы будете менять порты в браузере."
 
-# Очистка перед стартом
 $DOCKER_COMPOSE_CMD down &>/dev/null
 
 for (( i=1; i<=PANEL_COUNT; i++ ))
 do
-    # РАСЧЕТ ПОРТОВ
-    # Panel: 2053, 2054...
     TARGET_PANEL_PORT=$((2052 + i))
-    # Sub: 4053, 4054...
     TARGET_SUB_PORT=$((4052 + i))
-    # API: 60001, 60002...
     API_PORT=$((60000 + i))
-    # Metrics: 10001, 10002...
     METRICS_PORT=$((10000 + i))
 
-    echo -e "${CYAN}------------------------------------------------${NC}"
-    echo -e "${YELLOW}>>> [ Панель $i из $PANEL_COUNT ]${NC}"
-    
+    echo -e "${YELLOW}>>> [ Панель $i / $PANEL_COUNT ]${NC}"
     mkdir -p xui$i
-    
-    # Запуск
     $DOCKER_COMPOSE_CMD up -d xui$i
     
-    echo -e ""
-    echo -e "${GREEN}>>> Панель № $i запущена! Действуйте:${NC}"
-    echo -e "1. Откройте браузер: ${MAGENTA}http://$SERVER_IP:2053${NC}"
-    echo -e "   (Логин/Пароль: admin / admin)"
-    echo -e ""
-    echo -e "2. Перейдите в ${CYAN}Настройки панели (Panel Settings)${NC}:"
-    echo -e "   Поля для замены:"
-    echo -e "   -> Порт панели:      ${RED}$TARGET_PANEL_PORT${NC}"
-    echo -e "   -> Логин:            ${GREEN}$NEW_USERNAME${NC}"
-    echo -e "   -> Пароль:           ${GREEN}$NEW_PASSWORD${NC}"
-    echo -e "   -> URL root path:    (оставь пустым /)"
-    echo -e "   -> Путь к Cert:      ${YELLOW}$CERT_PATH${NC}"
-    echo -e "   -> Путь к Key:       ${YELLOW}$KEY_PATH${NC}"
-    echo -e "   * Нажмите Сохранить (Save), но ${RED}НЕ перезагружайте!${NC}"
-    echo -e ""
-    echo -e "3. Перейдите в ${CYAN}Настройки Xray (Xray Configuration)${NC}:"
-    echo -e "   -> Найдите \"port\": ... и замените на: ${RED}$API_PORT${NC}"
-    echo -e "   -> Найдите \"listen\": ... 11111 и замените на: ${RED}127.0.0.1:$METRICS_PORT${NC}"
-    echo -e "   * Нажмите Сохранить."
-    echo -e ""
-    echo -e "4. ${GREEN}Важно:${NC} Если есть поле 'Порт подписки' (Sub Port) в настройках,"
-    echo -e "   установите его на: ${RED}$TARGET_SUB_PORT${NC}"
-    echo -e ""
-    echo -e "5. Нажмите кнопку ${RED}Перезапустить панель (Restart Panel)${NC}."
-    echo -e "   (Сайт перестанет открываться — так и должно быть)."
-    echo -e ""
+    echo -e "${GREEN}1. Браузер:${NC} ${MAGENTA}http://$SERVER_IP:2053${NC} (admin/admin)"
+    echo -e "${GREEN}2. Настройки панели:${NC}"
+    echo -e "   Порт: ${RED}$TARGET_PANEL_PORT${NC} | Логин: ${GREEN}$NEW_USERNAME${NC} | Пароль: ${GREEN}$NEW_PASSWORD${NC}"
+    echo -e "   Cert: ${YELLOW}$CERT_PATH${NC}"
+    echo -e "   Key:  ${YELLOW}$KEY_PATH${NC}"
+    echo -e "   (Сохрани, но НЕ перезагружай)"
+    echo -e "${GREEN}3. Настройки Xray:${NC}"
+    echo -e "   port -> ${RED}$API_PORT${NC}"
+    echo -e "   listen 11111 -> ${RED}127.0.0.1:$METRICS_PORT${NC}"
+    echo -e "   (Сохрани)"
+    echo -e "${GREEN}4. Порт подписки:${NC} ${RED}$TARGET_SUB_PORT${NC} (если есть)"
+    echo -e "${GREEN}5. Жми 'Перезапустить панель'${NC}"
     
     while true; do
-        read -p "Вы сделали все настройки для панели $i? (y/n): " yn
+        read -p "Готово? (y/n): " yn
         case $yn in
             [Yy]* ) break;;
-            [Nn]* ) echo "Жду...";;
-            * ) echo "Напишите y или n";;
+            * ) echo "Напишите y";;
         esac
     done
 
-    echo -e "${YELLOW}>>> Выключаю панель $i...${NC}"
     $DOCKER_COMPOSE_CMD stop xui$i
 done
 
 # 9. Финал
-echo -e "${CYAN}================================================${NC}"
-echo -e "${YELLOW}>>> [8/8] Запускаю все панели (это может занять время)...${NC}"
+echo -e "${YELLOW}>>> [8/8] Запуск всех панелей...${NC}"
 $DOCKER_COMPOSE_CMD up -d
 
-echo -e "${CYAN}================================================${NC}"
-echo -e "${GREEN}   УСТАНОВКА ЗАВЕРШЕНА!   ${NC}"
-echo -e "${CYAN}================================================${NC}"
-echo -e "Ваши данные:"
-echo -e "Логин:  ${GREEN}$NEW_USERNAME${NC}"
-echo -e "Пароль: ${GREEN}$NEW_PASSWORD${NC}"
-echo -e ""
-echo -e "Ссылки для входа (HTTPS):"
-
+echo -e "${GREEN}ГОТОВО!${NC}"
+echo -e "Данные: $NEW_USERNAME / $NEW_PASSWORD"
 for (( i=1; i<=PANEL_COUNT; i++ ))
 do
     TARGET_PANEL_PORT=$((2052 + i))
-    TARGET_SUB_PORT=$((4052 + i))
-    echo -e "[$i] https://$DOMAIN:$TARGET_PANEL_PORT  (Sub Port: $TARGET_SUB_PORT)"
+    echo -e "Панель $i: https://$DOMAIN:$TARGET_PANEL_PORT"
 done
-echo -e "${CYAN}================================================${NC}"
