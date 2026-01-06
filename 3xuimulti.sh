@@ -13,15 +13,15 @@ BOLD='\033[1m'
 # Функция ожидания
 wait_for_apt() {
     while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-        echo -ne "${RED}⏳ Ждем завершения процессов apt...${NC}\r"
+        echo -ne "${RED}⏳ Ждем apt...${NC}\r"
         sleep 2
     done
 }
 
 clear
 echo -e "${CYAN}================================================${NC}"
-echo -e "${CYAN}   🚀 3X-UI MULTI-INSTALLER (v8.0 FINAL)       ${NC}"
-echo -e "${CYAN}   + Unique Paths & Custom Ports                ${NC}"
+echo -e "${CYAN}   🚀 3X-UI MULTI-INSTALLER (v9.0 FINAL)       ${NC}"
+echo -e "${CYAN}   + Full JSON Config + Unique Ports            ${NC}"
 echo -e "${CYAN}================================================${NC}"
 
 # 0. IP
@@ -30,7 +30,7 @@ if [ -z "$SERVER_IP" ]; then SERVER_IP=$(hostname -I | awk '{print $1}'); fi
 echo -e "${MAGENTA}>>> IP: $SERVER_IP ${NC}"
 
 # 1. Оптимизация
-echo -e "${YELLOW}>>> [1/8] Оптимизация системы...${NC}"
+echo -e "${YELLOW}>>> [1/8] Оптимизация...${NC}"
 wait_for_apt
 sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
 sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
@@ -121,13 +121,12 @@ echo -e "${CYAN}================================================${NC}"
 $DOCKER_CMD down &>/dev/null
 
 for (( i=1; i<=PANEL_COUNT; i++ )); do
-    # Генерация значений
-    TP=$((5000 + i))   # Панели начинаются с 5001
-    TSP=$((4000 + i))  # Подписки начинаются с 4001
+    TP=$((5000 + i))   # 5001, 5002...
+    TSP=$((4000 + i))  # 4001, 4002...
     API=$((60000 + i))
     MET=$((10000 + i))
     
-    # Генерация случайного пути (например /panel_a1b2/)
+    # Генерация пути
     RAND_SUFFIX=$(head /dev/urandom | tr -dc a-z0-9 | head -c 4)
     ROOT_PATH="/panel_${i}_${RAND_SUFFIX}/"
 
@@ -159,12 +158,101 @@ for (( i=1; i<=PANEL_COUNT; i++ )); do
     echo -e "    💾 Жми 'Save', но ${RED}НЕ ПЕРЕЗАГРУЖАЙ${NC}!"
     echo -e ""
     echo -e "${BOLD} 3. 'Xray Configuration' (Настройки Xray):${NC}"
-    echo -e "    📝 Замени цифры в JSON:"
-    echo -e "    [A] Блок ${BLUE}\"inbounds\"${NC} -> ${BLUE}\"tag\": \"api\"${NC}:"
-    echo -e "        \"port\": ...  --->  ${RED}$API${NC}"
-    echo -e ""
-    echo -e "    [B] Блок ${BLUE}\"metrics\"${NC} (внизу):"
-    echo -e "        \"listen\": ...  --->  \"listen\": \"127.0.0.1:${RED}$MET${NC}\""
+    echo -e "    Выдели ВЕСЬ старый код (Ctrl+A), удали его и вставь ЭТОТ:"
+    echo -e "${GREEN}⬇️⬇️⬇️ СКОПИРУЙ ОТСЮДА ⬇️⬇️⬇️${NC}"
+    echo -e "${GREEN}"
+    cat <<EOF
+{
+  "log": {
+    "access": "none",
+    "dnsLog": false,
+    "error": "",
+    "loglevel": "warning",
+    "maskAddress": ""
+  },
+  "api": {
+    "tag": "api",
+    "services": [
+      "HandlerService",
+      "LoggerService",
+      "StatsService"
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "api",
+      "listen": "127.0.0.1",
+      "port": $API,
+      "protocol": "tunnel",
+      "settings": {
+        "address": "127.0.0.1"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "AsIs",
+        "redirect": "",
+        "noises": []
+      }
+    },
+    {
+      "tag": "blocked",
+      "protocol": "blackhole",
+      "settings": {}
+    }
+  ],
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserDownlink": true,
+        "statsUserUplink": true
+      }
+    },
+    "system": {
+      "statsInboundDownlink": true,
+      "statsInboundUplink": true,
+      "statsOutboundDownlink": false,
+      "statsOutboundUplink": false
+    }
+  },
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "api"
+        ],
+        "outboundTag": "api"
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "ip": [
+          "geoip:private"
+        ]
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "protocol": [
+          "bittorrent"
+        ]
+      }
+    ]
+  },
+  "stats": {},
+  "metrics": {
+    "tag": "metrics_out",
+    "listen": "127.0.0.1:$MET"
+  }
+}
+EOF
+    echo -e "${NC}${GREEN}⬆️⬆️⬆️ ДО СЮДА ⬆️⬆️⬆️${NC}"
     echo -e ""
     echo -e "    💾 Жми 'Save'."
     echo -e ""
@@ -177,9 +265,7 @@ for (( i=1; i<=PANEL_COUNT; i++ )); do
         case $yn in [Yy]*) break;; *) echo "Жми y";; esac
     done
 
-    # Сохраняем путь во временный файл для отчета, т.к. переменная в цикле
     echo "$ROOT_PATH" > "xui$i/root_path.txt"
-
     echo -e "${YELLOW}>>> Стоп панель $i...${NC}"
     $DOCKER_CMD stop xui$i &>/dev/null
 done
@@ -196,7 +282,7 @@ echo "--------------------------------------------------------" >> $REPORT_FILE
 
 echo -e ""
 echo -e "${GREEN}🎉 УСТАНОВКА ЗАВЕРШЕНА!${NC}"
-echo -e "📄 Файл отчета: ${BOLD}/root/panels_info.txt${NC}"
+echo -e "📄 Файл: ${BOLD}/root/panels_info.txt${NC}"
 echo -e ""
 echo -e "${CYAN}📊 ТВОИ ПАНЕЛИ:${NC}"
 printf "%-5s | %-45s | %-10s\n" "#" "URL (HTTPS)" "Sub Port"
@@ -204,7 +290,6 @@ echo "-------------------------------------------------------------------------"
 for (( i=1; i<=PANEL_COUNT; i++ )); do
     TP=$((5000 + i))
     TSP=$((4000 + i))
-    # Читаем сохраненный путь
     RP=$(cat xui$i/root_path.txt 2>/dev/null)
     [ -z "$RP" ] && RP="/"
     
