@@ -20,8 +20,8 @@ wait_for_apt() {
 
 clear
 echo -e "${CYAN}================================================${NC}"
-echo -e "${CYAN}   🚀 3X-UI MULTI-INSTALLER (v9.0 FINAL)       ${NC}"
-echo -e "${CYAN}   + Full JSON Config + Unique Ports            ${NC}"
+echo -e "${CYAN}   🚀 3X-UI MULTI-INSTALLER (v10.0 SCALING)    ${NC}"
+echo -e "${CYAN}   + Auto-Scale + SSL Check + Full Config       ${NC}"
 echo -e "${CYAN}================================================${NC}"
 
 # 0. IP
@@ -29,22 +29,26 @@ SERVER_IP=$(curl -s -4 ifconfig.me)
 if [ -z "$SERVER_IP" ]; then SERVER_IP=$(hostname -I | awk '{print $1}'); fi
 echo -e "${MAGENTA}>>> IP: $SERVER_IP ${NC}"
 
-# 1. Оптимизация
-echo -e "${YELLOW}>>> [1/8] Оптимизация...${NC}"
-wait_for_apt
-sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
-sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
-sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
-cat >> /etc/sysctl.conf <<EOF
+# 1. Оптимизация (Пропускаем, если уже настроено)
+if ! grep -q "net.ipv4.tcp_congestion_control = bbr" /etc/sysctl.conf; then
+    echo -e "${YELLOW}>>> [1/8] Оптимизация системы...${NC}"
+    wait_for_apt
+    sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
+    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+    cat >> /etc/sysctl.conf <<EOF
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 EOF
-sysctl -p &>/dev/null
+    sysctl -p &>/dev/null
+else
+    echo -e "${GREEN}>>> [1/8] Система уже оптимизирована.${NC}"
+fi
 
 # 2. Обновление
-echo -e "${YELLOW}>>> [2/8] Обновление...${NC}"
+echo -e "${YELLOW}>>> [2/8] Проверка обновлений...${NC}"
 wait_for_apt
 killall unattended-upgr 2>/dev/null
 rm /var/lib/apt/lists/lock 2>/dev/null
@@ -75,29 +79,57 @@ NEW_USERNAME=${NEW_USERNAME:-admin}
 read -p "🔑 Пароль: " NEW_PASSWORD
 NEW_PASSWORD=${NEW_PASSWORD:-admin}
 
-# 5. SSL
-echo -e "${YELLOW}>>> [5/8] SSL...${NC}"
-wait_for_apt
-apt install certbot -y
-systemctl stop nginx 2>/dev/null
-certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
+# 5. SSL (Smart Check)
+echo -e "${YELLOW}>>> [5/8] Проверка SSL...${NC}"
 CERT_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
 KEY_PATH="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
-[ ! -f "$CERT_PATH" ] && echo -e "${RED}Ошибка SSL${NC}" && exit 1
 
-# 6. Кол-во панелей
-read -p "🔢 Сколько панелей (1-100): " PANEL_COUNT
+if [ -f "$CERT_PATH" ] && [ -f "$KEY_PATH" ]; then
+    echo -e "${GREEN}✅ Сертификаты уже существуют. Пропускаем генерацию.${NC}"
+else
+    echo -e "${YELLOW}>>> Сертификатов нет, запускаем Certbot...${NC}"
+    wait_for_apt
+    apt install certbot -y
+    systemctl stop nginx 2>/dev/null
+    certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
+    [ ! -f "$CERT_PATH" ] && echo -e "${RED}Ошибка SSL${NC}" && exit 1
+fi
+
+# 6. Подсчет панелей (Logic for Scaling)
 BASE_DIR="/root/3x-ui-farm"
 mkdir -p $BASE_DIR
 cd $BASE_DIR
 
-# 7. Конфиг
-echo -e "${YELLOW}>>> [6/8] Создание контейнеров...${NC}"
+EXISTING_COUNT=0
+if [ -f "docker-compose.yml" ]; then
+    EXISTING_COUNT=$(grep -c "container_name: xui" docker-compose.yml)
+fi
+
+echo -e "${MAGENTA}-------------------------------------------${NC}"
+if [ "$EXISTING_COUNT" -gt 0 ]; then
+    echo -e "Найдено установленных панелей: ${BOLD}$EXISTING_COUNT${NC}"
+    read -p "🔢 Сколько панелей ДОБАВИТЬ? (0 - просто пересоздать конфиг): " ADD_COUNT
+else
+    echo -e "Панелей не найдено."
+    read -p "🔢 Сколько панелей УСТАНОВИТЬ? (1-100): " ADD_COUNT
+fi
+
+if ! [[ "$ADD_COUNT" =~ ^[0-9]+$ ]]; then ADD_COUNT=0; fi
+TOTAL_COUNT=$((EXISTING_COUNT + ADD_COUNT))
+
+if [ "$TOTAL_COUNT" -eq 0 ]; then
+    echo "Нечего делать."
+    exit 0
+fi
+
+# 7. Генерация конфига (Пересоздаем полный файл)
+echo -e "${YELLOW}>>> [6/8] Обновление конфигурации ($TOTAL_COUNT шт.)...${NC}"
 cat > docker-compose.yml <<EOF
 version: '3'
 services:
 EOF
-for (( i=1; i<=PANEL_COUNT; i++ )); do
+
+for (( i=1; i<=TOTAL_COUNT; i++ )); do
     cat >> docker-compose.yml <<EOF
   xui$i:
     image: ghcr.io/mhsanaei/3x-ui:latest
@@ -113,55 +145,60 @@ for (( i=1; i<=PANEL_COUNT; i++ )); do
 EOF
 done
 
-# 8. Интерактив
-echo -e "${CYAN}================================================${NC}"
-echo -e "${CYAN}   🛠 РУЧНАЯ НАСТРОЙКА ($PANEL_COUNT шт.)         ${NC}"
-echo -e "${CYAN}================================================${NC}"
+# 8. Интерактив (Только для НОВЫХ)
+START_INDEX=$((EXISTING_COUNT + 1))
 
-$DOCKER_CMD down &>/dev/null
+if [ "$ADD_COUNT" -gt 0 ]; then
+    echo -e "${CYAN}================================================${NC}"
+    echo -e "${CYAN}   🛠 НАСТРОЙКА НОВЫХ ПАНЕЛЕЙ ($ADD_COUNT шт.)    ${NC}"
+    echo -e "${CYAN}================================================${NC}"
 
-for (( i=1; i<=PANEL_COUNT; i++ )); do
-    TP=$((5000 + i))   # 5001, 5002...
-    TSP=$((4000 + i))  # 4001, 4002...
-    API=$((60000 + i))
-    MET=$((10000 + i))
+    # Сначала гасим только новые, если они вдруг есть, но лучше просто убедиться что порты свободны
+    # $DOCKER_CMD down &>/dev/null # НЕЛЬЗЯ делать down, это убьет старые панели
     
-    # Генерация пути
-    RAND_SUFFIX=$(head /dev/urandom | tr -dc a-z0-9 | head -c 4)
-    ROOT_PATH="/panel_${i}_${RAND_SUFFIX}/"
+    for (( i=START_INDEX; i<=TOTAL_COUNT; i++ )); do
+        TP=$((5000 + i))
+        TSP=$((4000 + i))
+        API=$((60000 + i))
+        MET=$((10000 + i))
+        
+        RAND_SUFFIX=$(head /dev/urandom | tr -dc a-z0-9 | head -c 4)
+        ROOT_PATH="/panel_${i}_${RAND_SUFFIX}/"
 
-    echo -e "${YELLOW}>>> Запуск панели № $i...${NC}"
-    mkdir -p xui$i
-    $DOCKER_CMD up -d xui$i &>/dev/null
-    sleep 3
+        echo -e "${YELLOW}>>> Запуск НОВОЙ панели № $i...${NC}"
+        mkdir -p xui$i
+        
+        # Запускаем конкретный контейнер
+        $DOCKER_CMD up -d xui$i &>/dev/null
+        sleep 3
 
-    echo -e ""
-    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║             НАСТРОЙКА ПАНЕЛИ № $i (ИЗ $PANEL_COUNT)                      ║${NC}"
-    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
-    echo -e " 1. Открой: ${MAGENTA}http://$SERVER_IP:2053${NC}"
-    echo -e "    Логин: admin / Пароль: admin"
-    echo -e ""
-    echo -e "${BOLD} 2. 'Panel Settings' (Настройки панели):${NC}"
-    echo -e "    📝 ВПИШИ ЭТИ ДАННЫЕ:"
-    echo -e "    ┌──────────────────────────────────────────────────────────┐"
-    echo -e "    │ Порт панели:      2053 ---> ${RED}$TP${NC}                         │"
-    echo -e "    │ Порт подписки:    пусто ---> ${RED}$TSP${NC}                         │"
-    echo -e "    │ URL root path:    /    ---> ${RED}$ROOT_PATH${NC}            │"
-    echo -e "    │                                                          │"
-    echo -e "    │ Логин:            ---> ${GREEN}$NEW_USERNAME${NC}                     │"
-    echo -e "    │ Пароль:           ---> ${GREEN}$NEW_PASSWORD${NC}                     │"
-    echo -e "    │                                                          │"
-    echo -e "    │ Путь Cert:        ${YELLOW}$CERT_PATH${NC} │"
-    echo -e "    │ Путь Key:         ${YELLOW}$KEY_PATH${NC}  │"
-    echo -e "    └──────────────────────────────────────────────────────────┘"
-    echo -e "    💾 Жми 'Save', но ${RED}НЕ ПЕРЕЗАГРУЖАЙ${NC}!"
-    echo -e ""
-    echo -e "${BOLD} 3. 'Xray Configuration' (Настройки Xray):${NC}"
-    echo -e "    Выдели ВЕСЬ старый код (Ctrl+A), удали его и вставь ЭТОТ:"
-    echo -e "${GREEN}⬇️⬇️⬇️ СКОПИРУЙ ОТСЮДА ⬇️⬇️⬇️${NC}"
-    echo -e "${GREEN}"
-    cat <<EOF
+        echo -e ""
+        echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║             НАСТРОЙКА ПАНЕЛИ № $i (ИЗ $TOTAL_COUNT)                      ║${NC}"
+        echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+        echo -e " 1. Открой: ${MAGENTA}http://$SERVER_IP:2053${NC}"
+        echo -e "    Логин: admin / Пароль: admin"
+        echo -e ""
+        echo -e "${BOLD} 2. 'Panel Settings' (Настройки панели):${NC}"
+        echo -e "    📝 ВПИШИ ЭТИ ДАННЫЕ:"
+        echo -e "    ┌──────────────────────────────────────────────────────────┐"
+        echo -e "    │ Порт панели:      2053 ---> ${RED}$TP${NC}                         │"
+        echo -e "    │ Порт подписки:    пусто ---> ${RED}$TSP${NC}                         │"
+        echo -e "    │ URL root path:    /    ---> ${RED}$ROOT_PATH${NC}            │"
+        echo -e "    │                                                          │"
+        echo -e "    │ Логин:            ---> ${GREEN}$NEW_USERNAME${NC}                     │"
+        echo -e "    │ Пароль:           ---> ${GREEN}$NEW_PASSWORD${NC}                     │"
+        echo -e "    │                                                          │"
+        echo -e "    │ Путь Cert:        ${YELLOW}$CERT_PATH${NC} │"
+        echo -e "    │ Путь Key:         ${YELLOW}$KEY_PATH${NC}  │"
+        echo -e "    └──────────────────────────────────────────────────────────┘"
+        echo -e "    💾 Жми 'Save', но ${RED}НЕ ПЕРЕЗАГРУЖАЙ${NC}!"
+        echo -e ""
+        echo -e "${BOLD} 3. 'Xray Configuration' (Настройки Xray):${NC}"
+        echo -e "    Выдели ВЕСЬ старый код (Ctrl+A), удали его и вставь ЭТОТ:"
+        echo -e "${GREEN}⬇️⬇️⬇️ СКОПИРУЙ ОТСЮДА ⬇️⬇️⬇️${NC}"
+        echo -e "${GREEN}"
+        cat <<EOF
 {
   "log": {
     "access": "none",
@@ -252,26 +289,29 @@ for (( i=1; i<=PANEL_COUNT; i++ )); do
   }
 }
 EOF
-    echo -e "${NC}${GREEN}⬆️⬆️⬆️ ДО СЮДА ⬆️⬆️⬆️${NC}"
-    echo -e ""
-    echo -e "    💾 Жми 'Save'."
-    echo -e ""
-    echo -e "${BOLD} 4. Финал:${NC}"
-    echo -e "    🔥 Жми ${RED}Restart Panel${NC}."
-    echo -e ""
-    
-    while true; do
-        read -p "✅ Сделал? (y/n): " yn
-        case $yn in [Yy]*) break;; *) echo "Жми y";; esac
-    done
+        echo -e "${NC}${GREEN}⬆️⬆️⬆️ ДО СЮДА ⬆️⬆️⬆️${NC}"
+        echo -e ""
+        echo -e "    💾 Жми 'Save'."
+        echo -e ""
+        echo -e "${BOLD} 4. Финал:${NC}"
+        echo -e "    🔥 Жми ${RED}Restart Panel${NC}."
+        echo -e ""
+        
+        while true; do
+            read -p "✅ Сделал? (y/n): " yn
+            case $yn in [Yy]*) break;; *) echo "Жми y";; esac
+        done
 
-    echo "$ROOT_PATH" > "xui$i/root_path.txt"
-    echo -e "${YELLOW}>>> Стоп панель $i...${NC}"
-    $DOCKER_CMD stop xui$i &>/dev/null
-done
+        echo "$ROOT_PATH" > "xui$i/root_path.txt"
+        echo -e "${YELLOW}>>> Стоп панель $i...${NC}"
+        $DOCKER_CMD stop xui$i &>/dev/null
+    done
+else
+    echo -e "${GREEN}>>> Новых панелей нет, пропускаем ручную настройку.${NC}"
+fi
 
 # 9. Отчет
-echo -e "${YELLOW}>>> [8/8] Финальный запуск...${NC}"
+echo -e "${YELLOW}>>> [8/8] Финальный запуск всей фермы...${NC}"
 $DOCKER_CMD up -d &>/dev/null
 
 REPORT_FILE="/root/panels_info.txt"
@@ -281,15 +321,16 @@ echo "Логин/Пароль: $NEW_USERNAME / $NEW_PASSWORD" >> $REPORT_FILE
 echo "--------------------------------------------------------" >> $REPORT_FILE
 
 echo -e ""
-echo -e "${GREEN}🎉 УСТАНОВКА ЗАВЕРШЕНА!${NC}"
+echo -e "${GREEN}🎉 ВСЕ ГОТОВО!${NC}"
 echo -e "📄 Файл: ${BOLD}/root/panels_info.txt${NC}"
 echo -e ""
-echo -e "${CYAN}📊 ТВОИ ПАНЕЛИ:${NC}"
+echo -e "${CYAN}📊 ПОЛНЫЙ СПИСОК:${NC}"
 printf "%-5s | %-45s | %-10s\n" "#" "URL (HTTPS)" "Sub Port"
 echo "-------------------------------------------------------------------------"
-for (( i=1; i<=PANEL_COUNT; i++ )); do
+for (( i=1; i<=TOTAL_COUNT; i++ )); do
     TP=$((5000 + i))
     TSP=$((4000 + i))
+    # Читаем сохраненный путь (даже для старых панелей)
     RP=$(cat xui$i/root_path.txt 2>/dev/null)
     [ -z "$RP" ] && RP="/"
     
