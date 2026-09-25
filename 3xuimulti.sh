@@ -71,13 +71,24 @@ if docker compose version &> /dev/null; then DOCKER_CMD="docker compose"; else D
 # 4. Данные
 echo -e "${YELLOW}>>> [4/8] Конфигурация${NC}"
 read -p "📝 ДОМЕН: " DOMAIN
-[ -z "$DOMAIN" ] && exit 1
+DOMAIN=$(echo "$DOMAIN" | tr -d '[:space:]')
+if ! [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]; then
+    echo -e "${RED}Укажите корректный домен (например: panel.example.com)${NC}" >&2
+    exit 1
+fi
 
 echo -e "${BLUE}--- Данные админа ---${NC}"
 read -p "👤 Логин: " NEW_USERNAME
 NEW_USERNAME=${NEW_USERNAME:-admin}
-read -p "🔑 Пароль: " NEW_PASSWORD
-NEW_PASSWORD=${NEW_PASSWORD:-admin}
+read -s -p "🔑 Пароль: " NEW_PASSWORD
+echo ""
+if [ -z "$NEW_PASSWORD" ]; then
+    echo -e "${RED}Пароль не может быть пустым.${NC}" >&2
+    exit 1
+fi
+if [ "$NEW_USERNAME" = "admin" ]; then
+    echo -e "${YELLOW}Внимание: логин по умолчанию 'admin'. Рекомендуется задать другой.${NC}"
+fi
 
 # 5. SSL (Smart Check)
 echo -e "${YELLOW}>>> [5/8] Проверка SSL...${NC}"
@@ -299,10 +310,10 @@ EOF
         
         while true; do
             read -p "✅ Сделал? (y/n): " yn
-            case $yn in [Yy]*) break;; *) echo "Жми y";; esac
+            case $yn in [YyДд]*) break;; *) echo "Жми y";; esac
         done
 
-        echo "$ROOT_PATH" > "xui$i/root_path.txt"
+        printf '%s\n' "$ROOT_PATH" > "xui$i/root_path.txt"
         echo -e "${YELLOW}>>> Стоп панель $i...${NC}"
         $DOCKER_CMD stop xui$i &>/dev/null
     done
@@ -317,7 +328,7 @@ $DOCKER_CMD up -d &>/dev/null
 REPORT_FILE="/root/panels_info.txt"
 echo "=== ОТЧЕТ 3X-UI ===" > $REPORT_FILE
 echo "Домен: $DOMAIN" >> $REPORT_FILE
-echo "Логин/Пароль: $NEW_USERNAME / $NEW_PASSWORD" >> $REPORT_FILE
+echo "Логин: $NEW_USERNAME (пароль вводился при установке и не сохраняется)" >> $REPORT_FILE
 echo "--------------------------------------------------------" >> $REPORT_FILE
 
 echo -e ""
